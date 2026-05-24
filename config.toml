@@ -1,0 +1,32 @@
+cache_dir = "./cache"
+port = 3000
+enable_upstreams = true
+trust_x_forwarded_for = true
+
+[auth]
+username = "user"
+password = "password"
+
+[upstreams.npm]
+path = "/npm"
+upstream_url = "https://registry.npmjs.org"
+metadata_max_age = "5m"
+content_max_age = "24h"
+
+[upstreams.maven]
+path = "/maven"
+upstream_url = "https://repo1.maven.org/maven2"
+metadata_max_age = "5m"
+content_max_age = "24h"
+
+[upstreams.apt]
+path = "/apt"
+upstream_url = "https://ports.ubuntu.com"
+metadata_max_age = "5m"
+content_max_age = "24h"
+
+[upstreams.pypi]
+path = "/pypi"
+upstream_url = "https://pypi.org/simple"
+metadata_max_age = "5m"
+content_max_age = "24h"

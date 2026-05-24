@@ -1,0 +1,54 @@
+name: CI
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+      - name: Test
+        run: go test -timeout 600s ./...
+      - name: Build binary
+        run: CGO_ENABLED=0 go build -ldflags="-s -w" -o artifacts-proxy ./cmd/artifacts-proxy/
+      - name: Package
+        run: tar cvfz artifacts-proxy-${{ github.sha }}.tar.gz config.toml artifacts-proxy
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-proxy-${{ github.sha }}
+          path: artifacts-proxy-${{ github.sha }}.tar.gz
+          retention-days: 30
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}

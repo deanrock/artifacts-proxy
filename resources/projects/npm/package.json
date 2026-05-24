@@ -1,0 +1,7 @@
+{
+  "name": "nodejs-project",
+  "dependencies": {
+    "ejs": "^3.1.10",
+    "fastify": "^5.3.0"
+  }
+}

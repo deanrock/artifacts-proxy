@@ -1,0 +1,4 @@
+deb http://user:password@host.docker.internal:PORT/apt/ubuntu-ports/ jammy main restricted
+deb http://user:password@host.docker.internal:PORT/apt/ubuntu-ports/ jammy-updates main restricted
+deb http://user:password@host.docker.internal:PORT/apt/ubuntu-ports/ jammy universe
+deb http://user:password@host.docker.internal:PORT/apt/ubuntu-ports/ jammy-updates universe
