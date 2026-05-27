@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ type ConfigUpstreamFallback struct {
 }
 
 type ConfigUpstream struct {
+	Type                 string                  `toml:"type"`
 	Path                 string                  `toml:"path"`
 	UpstreamURL          string                  `toml:"upstream_url"`
 	AuthenticationHeader *string                 `toml:"authentication_header"`
@@ -107,6 +109,9 @@ func ParseFile(path string) (*Config, error) {
 		return nil, fmt.Errorf("auth username and password are required")
 	}
 	for name, up := range config.Upstreams {
+		if !slices.Contains([]string{"npm", "pypi", "maven", "apt"}, up.Type) {
+			return nil, fmt.Errorf("upstream %q: type is required; valid options: npm, pypi, maven, apt", name)
+		}
 		if up.MetadataMaxAge == "" {
 			return nil, fmt.Errorf("upstream %q: metadata_max_age is required", name)
 		}

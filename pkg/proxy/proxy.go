@@ -19,10 +19,36 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/sethvargo/go-limiter/memorystore"
 )
 
+type UpstreamType string
+
+const (
+	Npm   UpstreamType = "npm"
+	Pypi  UpstreamType = "pypi"
+	Maven UpstreamType = "maven"
+	Apt   UpstreamType = "apt"
+)
+
+func ParseType(typ string) (UpstreamType, error) {
+	switch typ {
+	case "npm":
+		return Npm, nil
+	case "pypi":
+		return Pypi, nil
+	case "maven":
+		return Maven, nil
+	case "apt":
+		return Apt, nil
+	}
+
+	return "", fmt.Errorf("unknown type")
+}
+
 type upstream struct {
+	typ                  UpstreamType
 	name                 string
 	path                 string
 	upstreamURL          string
@@ -89,12 +115,16 @@ func proxyUpstream(config *config.Config, up *upstream, req *http.Request) (*htt
 		return nil, fmt.Errorf("creating upstream request: %w", err)
 	}
 
-	for k, vv := range req.Header {
-		lower := strings.ToLower(k)
-		if lower == "host" || lower == "content-type" || lower == "accept-encoding" {
-			continue
-		}
-		outReq.Header[k] = vv
+	// Specify user agent to be nice. Additionally, some upstreams might throttle requests without one.
+	outReq.Header.Set("User-Agent", "ArtifactsProxy (+https://github.com/deanrock/artifacts-proxy)")
+
+	// Python's Simple repository API supports either application/vnd.pypi.simple.v1+html
+	// (same as text/html) or application/vnd.pypi.simple.v1+json.
+	//
+	// Here we force HTML, since it might be a bit more supported, and to ensure that a single
+	// content type is always cached.
+	if up.typ == Pypi {
+		outReq.Header.Set("Content-Type", "text/html")
 	}
 
 	if up.authenticationHeader != nil {
@@ -165,7 +195,7 @@ func getCachedItem(config *config.Config, s3c *s3Store, up *upstream, req *http.
 			return nil, err
 		}
 
-		if ct == "text/html" {
+		if up.typ == Pypi && ct == "text/html" {
 			body, err := io.ReadAll(upstreamResp.Body)
 			if err != nil {
 				return nil, err
@@ -423,7 +453,12 @@ func RunServer(listener net.Listener, config *config.Config) error {
 		metadataMaxAge, _ := time.ParseDuration(cfg.MetadataMaxAge)
 		contentMaxAge, _ := time.ParseDuration(cfg.ContentMaxAge)
 
+		typ, err := ParseType(cfg.Type)
+		if err != nil {
+			return errors.Wrapf(err, "failed to parse type '%s'", cfg.Type)
+		}
 		up := &upstream{
+			typ:                  typ,
 			name:                 name,
 			path:                 cfg.Path,
 			upstreamURL:          cfg.UpstreamURL,
