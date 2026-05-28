@@ -1,8 +1,10 @@
-package proxy_test
+//go:build e2e
+// +build e2e
+
+package proxy
 
 import (
 	"artifacts-proxy/pkg/config"
-	"artifacts-proxy/pkg/proxy"
 	"context"
 	"fmt"
 	"net"
@@ -59,7 +61,7 @@ func testCachingBehaviour(t *testing.T, project string, command []string) {
 	done1 := make(chan struct{})
 	go func() {
 		defer close(done1)
-		proxy.RunServer(listener1, config1)
+		RunServer(listener1, config1)
 	}()
 
 	runCommand(t, project, port1, command)
@@ -81,7 +83,7 @@ func testCachingBehaviour(t *testing.T, project string, command []string) {
 	config2.Port = port2
 	config2.CacheDir = cacheDir
 
-	go proxy.RunServer(listener2, config2)
+	go RunServer(listener2, config2)
 
 	runCommand(t, project, port2, command)
 }
