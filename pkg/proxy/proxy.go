@@ -522,7 +522,7 @@ func RunServer(listener net.Listener, config *config.Config) error {
 
 	// Default route should apply auth to prevent route discovery.
 	mux.Handle("/", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
+		w.WriteHeader(404)
 	})))
 
 	server := &http.Server{Handler: loggingMiddleware(mux)}

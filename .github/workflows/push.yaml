@@ -21,9 +21,9 @@ jobs:
         with:
           go-version: '1.26'
       - name: Test
-        run: go test -timeout 600s ./...
+        run: make test-e2e
       - name: Build binary
-        run: CGO_ENABLED=0 go build -ldflags="-s -w" -o artifacts-proxy ./cmd/artifacts-proxy/
+        run: make build
       - name: Package
         run: tar cvfz artifacts-proxy-${{ github.sha }}.tar.gz config.toml artifacts-proxy
       - name: Upload artifact
