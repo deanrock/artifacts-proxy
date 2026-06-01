@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -14,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
@@ -25,21 +23,12 @@ type s3Store struct {
 }
 
 func newS3Store(cfg *config.ConfigS3) (*s3Store, error) {
-	awsCfg, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion(cfg.Region))
+	client, err := NewS3Client(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("loading AWS config: %w", err)
+		return nil, err
 	}
 
-	var s3Opts []func(*s3.Options)
-	if cfg.Endpoint != "" {
-		endpoint := cfg.Endpoint
-		s3Opts = append(s3Opts, func(o *s3.Options) {
-			o.BaseEndpoint = aws.String(endpoint)
-			o.UsePathStyle = true
-		})
-	}
-
-	return &s3Store{client: s3.NewFromConfig(awsCfg, s3Opts...), cfg: cfg}, nil
+	return &s3Store{client: client, cfg: cfg}, nil
 }
 
 func (s *s3Store) key(filename string) string {
