@@ -61,6 +61,9 @@ func TestDefaultRouteAuthTable(t *testing.T) {
 		{name: "unknown subpath without auth", path: "/something/", authUser: "", authPass: "", expectedStatus: http.StatusUnauthorized},
 		{name: "npm upstream without auth", path: "/npm/", authUser: "", authPass: "", expectedStatus: http.StatusUnauthorized},
 		{name: "npm upstream with auth", path: "/npm/", authUser: "user", authPass: "pass", expectedStatus: http.StatusBadGateway},
+		{name: "npm upstream without slash suffix with auth", path: "/npm", authUser: "user", authPass: "pass", expectedStatus: http.StatusBadGateway},
+		{name: "npm upstream without slash suffix without auth", path: "/npm", authUser: "", authPass: "", expectedStatus: http.StatusUnauthorized},
+		{name: "npm upstream with random suffix", path: "/npmsomething", authUser: "user", authPass: "pass", expectedStatus: http.StatusNotFound},
 	}
 
 	client := http.DefaultClient
