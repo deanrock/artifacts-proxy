@@ -2,16 +2,21 @@ package proxy
 
 import (
 	"artifacts-proxy/pkg/config"
+	"context"
 	"errors"
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/johannesboyne/gofakes3"
+	"github.com/johannesboyne/gofakes3/backend/s3mem"
 )
 
-func TestDefaultRouteAuthTable(t *testing.T) {
-	t.Parallel()
-
+func GetConfig(t *testing.T, f func(*config.Config)) *config.Config {
 	cfg := &config.Config{
 		Auth: config.ConfigAuth{
 			Username: "user",
@@ -23,13 +28,114 @@ func TestDefaultRouteAuthTable(t *testing.T) {
 				Path:                 "/npm",
 				UpstreamURL:          "http://127.0.0.1:1234/npm/",
 				AuthenticationHeader: new("Bearer token"),
-				MetadataMaxAge:       "5ms",
-				ContentMaxAge:        "5xm",
+				MetadataMaxAge:       "5m",
+				ContentMaxAge:        "5m",
 			},
 		},
 		CacheDir:        t.TempDir(),
-		EnableUpstreams: false,
+		EnableUpstreams: true,
 	}
+	f(cfg)
+	if err := config.CheckConfig(cfg); err != nil {
+		panic(err)
+	}
+	return cfg
+}
+
+type TestServer struct {
+	t        *testing.T
+	done     chan error
+	listener net.Listener
+}
+
+func NewTestServer(t *testing.T, cfg *config.Config) *TestServer {
+	ts := TestServer{
+		t:    t,
+		done: make(chan error, 1),
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts.listener = listener
+
+	go func() {
+		err := RunServer(ts.listener, cfg)
+
+		// Fail if error happens, since otherwise test will just hang.
+		if !errors.Is(err, net.ErrClosed) {
+			log.Fatal(err)
+		}
+
+		ts.done <- err
+	}()
+
+	return &ts
+}
+
+func (ts *TestServer) Request(path string) *http.Response {
+	url := "http://" + ts.listener.Addr().String() + "/npm/"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		ts.t.Fatalf("creating request: %v", err)
+	}
+	req.SetBasicAuth("user", "pass")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		ts.t.Fatalf("do request: %v", err)
+	}
+	return resp
+}
+
+func (ts *TestServer) Stop() {
+	ts.listener.Close()
+	<-ts.done
+}
+
+func TestProxyBehaviour(t *testing.T) {
+	t.Parallel()
+
+	backend := s3mem.New()
+	faker := gofakes3.New(backend)
+	s3ts := httptest.NewServer(faker.Server())
+	defer s3ts.Close()
+
+	cfg := GetConfig(t, func(c *config.Config) {
+		c.S3 = &config.ConfigS3{
+			Region:    "us-east-1",
+			Bucket:    "bucket",
+			Endpoint:  s3ts.URL,
+			AccessKey: "ACCESS_KEY",
+			SecretKey: "SECRET_KEY",
+		}
+	})
+
+	client, err := NewS3Client(cfg.S3)
+	if err != nil {
+		panic(err)
+	}
+	_, err = client.CreateBucket(context.Background(), &s3.CreateBucketInput{
+		Bucket: aws.String("bucket"),
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	ts := NewTestServer(t, cfg)
+	defer ts.Stop()
+
+	resp := ts.Request("/npm/")
+	log.Fatal(resp)
+}
+
+func TestDefaultRouteAuthTable(t *testing.T) {
+	t.Parallel()
+
+	cfg := GetConfig(t, func(c *config.Config) {
+		c.EnableUpstreams = false
+	})
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

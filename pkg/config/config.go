@@ -39,21 +39,33 @@ type ConfigUpstream struct {
 }
 
 type ConfigS3 struct {
-	Bucket   string `toml:"bucket"`
-	Region   string `toml:"region"`
-	Prefix   string `toml:"prefix"`
+	Bucket string `toml:"bucket"`
+	Region string `toml:"region"`
+	Prefix string `toml:"prefix"`
+
+	// Endpoint is optional, primarly used for cases outside of AWS.
 	Endpoint string `toml:"endpoint"`
+
+	// Access & secret keys are optional. By default, auth is fetched from the environment.
+	AccessKey string `toml:"access_key"`
+	SecretKey string `toml:"secret_key"`
+
+	// If access and secret keys are provided, optional session token can be provided as well.
+	SessionToken string `toml:"session_token"`
 }
 
 type Config struct {
-	Port               uint16                    `toml:"port"`
-	TLS                *ConfigTLS                `toml:"tls"`
-	CacheDir           string                    `toml:"cache_dir"`
-	EnableUpstreams    bool                      `toml:"enable_upstreams"`
-	Upstreams          map[string]ConfigUpstream `toml:"upstreams"`
-	Auth               ConfigAuth                `toml:"auth"`
-	S3                 *ConfigS3                 `toml:"s3"`
-	TrustXForwardedFor bool                      `toml:"trust_x_forwarded_for"`
+	Port            uint16                    `toml:"port"`
+	TLS             *ConfigTLS                `toml:"tls"`
+	CacheDir        string                    `toml:"cache_dir"`
+	EnableUpstreams bool                      `toml:"enable_upstreams"`
+	Upstreams       map[string]ConfigUpstream `toml:"upstreams"`
+	Auth            ConfigAuth                `toml:"auth"`
+
+	// Optional S3 config.
+	S3 *ConfigS3 `toml:"s3"`
+
+	TrustXForwardedFor bool `toml:"trust_x_forwarded_for"`
 }
 
 // resolveEnvVars walks all string fields in v and replaces any value starting
@@ -107,28 +119,40 @@ func ParseFile(path string) (*Config, error) {
 	if err := resolveEnvVars(reflect.ValueOf(&config).Elem()); err != nil {
 		return nil, fmt.Errorf("resolving env vars: %w", err)
 	}
-	if config.Auth.Username == "" || config.Auth.Password == "" {
-		return nil, fmt.Errorf("auth username and password are required")
+
+	if err := CheckConfig(&config); err != nil {
+		return nil, err
 	}
+
+	return &config, nil
+}
+
+func CheckConfig(config *Config) error {
+	if config.Auth.Username == "" || config.Auth.Password == "" {
+		return fmt.Errorf("auth username and password are required")
+	}
+
 	if config.Auth.Realm == "" {
 		config.Auth.Realm = "artifacts-proxy"
 	}
+
 	for name, up := range config.Upstreams {
 		if !slices.Contains([]string{"npm", "pypi", "maven", "apt"}, up.Type) {
-			return nil, fmt.Errorf("upstream %q: type is required; valid options: npm, pypi, maven, apt", name)
+			return fmt.Errorf("upstream %q: type is required; valid options: npm, pypi, maven, apt", name)
 		}
 		if up.MetadataMaxAge == "" {
-			return nil, fmt.Errorf("upstream %q: metadata_max_age is required", name)
+			return fmt.Errorf("upstream %q: metadata_max_age is required", name)
 		}
 		if up.ContentMaxAge == "" {
-			return nil, fmt.Errorf("upstream %q: content_max_age is required", name)
+			return fmt.Errorf("upstream %q: content_max_age is required", name)
 		}
 		if _, err := time.ParseDuration(up.MetadataMaxAge); err != nil {
-			return nil, fmt.Errorf("upstream %q: invalid metadata_max_age: %w", name, err)
+			return fmt.Errorf("upstream %q: invalid metadata_max_age: %w", name, err)
 		}
 		if _, err := time.ParseDuration(up.ContentMaxAge); err != nil {
-			return nil, fmt.Errorf("upstream %q: invalid content_max_age: %w", name, err)
+			return fmt.Errorf("upstream %q: invalid content_max_age: %w", name, err)
 		}
 	}
-	return &config, nil
+
+	return nil
 }
