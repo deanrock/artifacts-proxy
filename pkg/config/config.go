@@ -14,6 +14,8 @@ import (
 type ConfigAuth struct {
 	Username string `toml:"username"`
 	Password string `toml:"password"`
+	// Some package managers (e.g. SBT) require specifying realm name to support authentication.
+	Realm string `toml:"realm"`
 }
 
 type ConfigTLS struct {
@@ -107,6 +109,9 @@ func ParseFile(path string) (*Config, error) {
 	}
 	if config.Auth.Username == "" || config.Auth.Password == "" {
 		return nil, fmt.Errorf("auth username and password are required")
+	}
+	if config.Auth.Realm == "" {
+		config.Auth.Realm = "artifacts-proxy"
 	}
 	for name, up := range config.Upstreams {
 		if !slices.Contains([]string{"npm", "pypi", "maven", "apt"}, up.Type) {

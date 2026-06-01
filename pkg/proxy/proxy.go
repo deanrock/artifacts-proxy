@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -22,6 +21,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sethvargo/go-limiter/memorystore"
 )
+
+var ErrMissing = errors.New("artifact missing")
 
 type UpstreamType string
 
@@ -136,24 +137,14 @@ func proxyUpstream(config *config.Config, up *upstream, req *http.Request) (*htt
 	return httpClient.Do(outReq)
 }
 
-func getCachedItem(config *config.Config, s3c *s3Store, up *upstream, req *http.Request) (*http.Response, error) {
-	params := cache.Params{
-		UpstreamName: up.name,
-		URL:          req.URL.RequestURI(),
-		Method:       req.Method,
-	}
-
-	hash, err := params.Hash()
-	if err != nil {
-		return nil, err
-	}
-
+func getCachedItem(ctx context.Context, config *config.Config, logger *slog.Logger, s3c *s3Store, up *upstream, req *http.Request, params cache.Params, hash string) (*http.Response, error) {
 	cacheDir := config.CacheDir
 	cachePath := filepath.Join(cacheDir, hash)
 	metaPath := cachePath + ".metadata"
 
-	serveLocal := func(logVerb string) (*http.Response, error) {
-		log.Printf("%s %s %s %s", logVerb, up.name, req.URL.RequestURI(), hash)
+	serveLocal := func(typ string) (*http.Response, error) {
+		logger.Debug("serving local", slog.String("type", typ))
+
 		meta, err := readMetadata(metaPath)
 		if err != nil {
 			return nil, err
@@ -173,7 +164,27 @@ func getCachedItem(config *config.Config, s3c *s3Store, up *upstream, req *http.
 		return resp, nil
 	}
 
-	cacheAndServe := func(upstreamResp *http.Response) (*http.Response, error) {
+	serveStale := func(typ string) (*http.Response, error) {
+		if fileExists(cachePath) && fileExists(metaPath) {
+			return serveLocal(typ)
+		}
+
+		if s3c != nil {
+			err := s3c.fetch(ctx, hash, cacheDir)
+			if err == nil {
+				return serveLocal(typ)
+			}
+
+			if !isS3NotFound(err) {
+				logger.Error("failed fetching from S3", slog.String("err", err.Error()))
+				return nil, errors.Wrap(err, "failed fetching stale from S3")
+			}
+		}
+
+		return nil, ErrMissing
+	}
+
+	cache := func(upstreamResp *http.Response) error {
 		ct := upstreamResp.Header.Get("Content-Type")
 		var ctPtr *string
 		if ct != "" {
@@ -189,24 +200,24 @@ func getCachedItem(config *config.Config, s3c *s3Store, up *upstream, req *http.
 
 		metaData, err := json.Marshal(meta)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if err := atomicWriteBytes(filepath.Join(cacheDir, "tmp"), metaPath, metaData); err != nil {
-			return nil, err
+			return err
 		}
 
 		if up.typ == Pypi && ct == "text/html" {
 			body, err := io.ReadAll(upstreamResp.Body)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			rewritten := strings.ReplaceAll(string(body), "https://files.pythonhosted.org/", "/pythonhosted/")
 			if err := atomicWriteBytes(filepath.Join(cacheDir, "tmp"), cachePath, []byte(rewritten)); err != nil {
-				return nil, err
+				return err
 			}
 		} else {
 			if err := atomicWriteReader(filepath.Join(cacheDir, "tmp"), cachePath, upstreamResp.Body); err != nil {
-				return nil, err
+				return err
 			}
 		}
 
@@ -214,94 +225,87 @@ func getCachedItem(config *config.Config, s3c *s3Store, up *upstream, req *http.
 			go s3c.upload(context.Background(), hash, cacheDir)
 		}
 
-		f, err := os.Open(cachePath)
-		if err != nil {
-			return nil, err
-		}
-
-		resp := &http.Response{
-			StatusCode: upstreamResp.StatusCode,
-			Header:     make(http.Header),
-			Body:       f,
-		}
-		if ctPtr != nil && *ctPtr != "" {
-			resp.Header.Set("Content-Type", *ctPtr)
-		}
-		return resp, nil
+		return nil
 	}
 
+	// Serve locally if not stale.
 	if fileExists(cachePath) && fileExists(metaPath) {
-		localMeta, metaErr := readMetadata(metaPath)
-		if metaErr == nil && !isStale(localMeta, up, req.URL.Path) {
-			return serveLocal("serving")
-		}
-
-		// Stale: check S3 for a newer version before hitting upstream
-		if metaErr == nil && s3c != nil {
-			if s3Meta, err := s3c.getMetadata(req.Context(), hash); err == nil {
-				localTime, _ := time.Parse(time.RFC3339, localMeta.LastUpdated)
-				s3Time, s3Err := time.Parse(time.RFC3339, s3Meta.LastUpdated)
-				if s3Err == nil && s3Time.After(localTime) {
-					if fetchErr := s3c.fetch(req.Context(), hash, cacheDir); fetchErr == nil {
-						return serveLocal("s3-refresh")
-					}
-				}
+		localMeta, err := readMetadata(metaPath)
+		if err == nil {
+			if !isStale(localMeta, up, params.URL) {
+				return serveLocal("local")
 			}
 		}
-
-		// Try upstream; on failure, serve stale
-		log.Printf("refreshing %s %s %s", up.name, req.URL.RequestURI(), hash)
-		upstreamResp, upstreamErr := proxyUpstream(config, up, req)
-		if upstreamErr != nil {
-			return serveLocal("serving-stale")
-		}
-		defer upstreamResp.Body.Close()
-		if upstreamResp.StatusCode != http.StatusOK && upstreamResp.StatusCode != http.StatusNotFound {
-			return serveLocal("serving-stale")
-		}
-		return cacheAndServe(upstreamResp)
 	}
 
+	// Fetch from S3 if not stale.
 	if s3c != nil {
-		if err := s3c.fetch(req.Context(), hash, cacheDir); err == nil {
-			return serveLocal("s3-hit")
-		} else if !isS3NotFound(err) {
-			log.Printf("[s3] fetch %s: %v", hash, err)
+		if s3Meta, err := s3c.getMetadata(ctx, hash); err != nil {
+			if !isS3NotFound(err) {
+				logger.Error("failed fetching from S3", slog.String("err", err.Error()))
+			}
+		} else if !isStale(s3Meta, up, params.URL) {
+			if err := s3c.fetch(ctx, hash, cacheDir); err != nil {
+				logger.Error("failed fetching from S3", slog.String("err", err.Error()))
+			}
+			return serveLocal("refreshed-from-s3")
 		}
 	}
 
-	log.Printf("fetching %s %s %s", up.name, req.URL.RequestURI(), hash)
-
+	// Fetch from upstream. On failure, serve stale if exists.
+	logger.Debug("refreshing from upstream")
 	upstreamResp, err := proxyUpstream(config, up, req)
 	if err != nil {
-		return nil, err
+		logger.Error("refreshing from upstream failed", slog.String("err", err.Error()))
+		return serveStale("upstream-failed")
 	}
 	defer upstreamResp.Body.Close()
 
 	switch upstreamResp.StatusCode {
 	case http.StatusOK, http.StatusNotFound:
-		return cacheAndServe(upstreamResp)
+		if err := cache(upstreamResp); err != nil {
+			return nil, errors.Wrap(err, "error while caching upstream response")
+		}
+		return serveLocal("local-after-refresh")
 	default:
-		log.Printf("[%s] unexpected upstream response: %d", up.name, upstreamResp.StatusCode)
+		logger.Warn("refreshing from upstream failed; unexpected status code", slog.Int("code", upstreamResp.StatusCode))
+		return serveStale("stale-upstream-failed")
+	}
+}
+
+func getCachedItemWithFallback(config *config.Config, s3c *s3Store, up *upstream, req *http.Request) (*http.Response, error) {
+	params := cache.Params{
+		UpstreamName: up.name,
+		URL:          req.URL.RequestURI(),
+		Method:       req.Method,
+	}
+
+	hash, err := params.Hash()
+	if err != nil {
+		return nil, err
+	}
+
+	logger := slog.With(slog.String("upstream", up.name), slog.String("url", params.URL), slog.String("hash", hash))
+	logger.Debug("fetching cached item")
+
+	resp, err := getCachedItem(req.Context(), config, logger, s3c, up, cloneRequestHead(req), params, hash)
+	if err != nil && !errors.Is(err, ErrMissing) {
+		return nil, err
+	}
+
+	if up.fallback != nil && (errors.Is(err, ErrMissing) || resp.StatusCode == http.StatusNotFound) {
+		resp.Body.Close()
+		return getCachedItemWithFallback(config, s3c, up.fallback, cloneRequestHead(req))
+	}
+
+	// Return 502 if URL is not cached and cannot be successfully fetched.
+	if errors.Is(err, ErrMissing) {
 		return &http.Response{
 			StatusCode: http.StatusBadGateway,
 			Body:       http.NoBody,
 		}, nil
 	}
-}
-
-func getCachedItemWithFallback(config *config.Config, s3c *s3Store, up *upstream, req *http.Request) (*http.Response, error) {
-	resp, err := getCachedItem(config, s3c, up, cloneRequestHead(req))
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode == http.StatusNotFound && up.fallback != nil {
-		resp.Body.Close()
-		return getCachedItemWithFallback(config, s3c, up.fallback, cloneRequestHead(req))
-	}
-
-	return resp, nil
+	return resp, err
 }
 
 func cloneRequestHead(req *http.Request) *http.Request {
@@ -373,7 +377,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		log.Printf("%s %s %d %s", r.Method, r.URL.RequestURI(), rec.status, time.Since(start))
+		slog.Info("request handled", slog.String("url", r.URL.Path), slog.String("method", r.Method), slog.Int("code", rec.status), slog.String("duration", time.Since(start).String()))
 	})
 }
 
@@ -390,7 +394,7 @@ func basicAuthMiddlewareFactory(auth config.ConfigAuth, xForwardedForEnabled boo
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			writeUnauthorizedResponse := func() {
-				w.Header().Set("WWW-Authenticate", `Basic realm="artifacts-proxy"`)
+				w.Header().Set("WWW-Authenticate", "Basic realm=\""+auth.Realm+"\"")
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 			}
 
@@ -415,7 +419,7 @@ func basicAuthMiddlewareFactory(auth config.ConfigAuth, xForwardedForEnabled boo
 				}
 
 				if !ok {
-					slog.Info("[authMiddleware] throttled", slog.String("ip", ip))
+					slog.Warn("[authMiddleware] throttled", slog.String("ip", ip))
 					http.Error(w, "too many requests", http.StatusTooManyRequests)
 					return
 				}
@@ -441,7 +445,7 @@ func RunServer(listener net.Listener, config *config.Config) error {
 		if err != nil {
 			return fmt.Errorf("initializing S3: %w", err)
 		}
-		log.Printf("S3 storage enabled: bucket=%s region=%s", config.S3.Bucket, config.S3.Region)
+		slog.Info("S3 storage enabled", slog.String("bucket", config.S3.Bucket), slog.String("region", config.S3.Region))
 	}
 
 	upstreams := make(map[string]*upstream)
@@ -502,22 +506,25 @@ func RunServer(listener net.Listener, config *config.Config) error {
 	}
 
 	for _, up := range upstreams {
-		mux.Handle("GET "+up.path+"/", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			resp, err := getCachedItemWithFallback(config, s3c, up, r)
-			if err != nil {
-				log.Printf("[%s] error: %v", up.name, err)
-				http.Error(w, "internal server error", http.StatusInternalServerError)
-				return
-			}
-			defer resp.Body.Close()
-			for k, vv := range resp.Header {
-				for _, v := range vv {
-					w.Header().Add(k, v)
+		// In case of `/pypi/simple -> https://pypi.org/simple` we need to support proxying both `/pypi/simple/` as well as just `/pypi/simple`.
+		for _, url := range []string{up.path, up.path + "/"} {
+			mux.Handle("GET "+url, authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp, err := getCachedItemWithFallback(config, s3c, up, r)
+				if err != nil {
+					slog.Error("request failed", slog.String("url", r.URL.Path), slog.String("err", err.Error()))
+					http.Error(w, "internal server error", http.StatusInternalServerError)
+					return
 				}
-			}
-			w.WriteHeader(resp.StatusCode)
-			io.Copy(w, resp.Body)
-		})))
+				defer resp.Body.Close()
+				for k, vv := range resp.Header {
+					for _, v := range vv {
+						w.Header().Add(k, v)
+					}
+				}
+				w.WriteHeader(resp.StatusCode)
+				io.Copy(w, resp.Body)
+			})))
+		}
 	}
 
 	// Default route should apply auth to prevent route discovery.

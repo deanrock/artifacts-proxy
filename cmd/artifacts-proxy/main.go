@@ -6,12 +6,30 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
+	"os"
 )
 
 func main() {
 	configPath := flag.String("config", "config.toml", "path to config file")
 	flag.Parse()
+
+	logLevel, ok := os.LookupEnv("LOG_LEVEL")
+	if ok {
+		switch logLevel {
+		case "debug":
+			slog.SetLogLoggerLevel(slog.LevelDebug)
+		case "info":
+			slog.SetLogLoggerLevel(slog.LevelInfo)
+		case "warn":
+			slog.SetLogLoggerLevel(slog.LevelWarn)
+		case "error":
+			slog.SetLogLoggerLevel(slog.LevelError)
+		default:
+			log.Fatalf("Invalid LOG_LEVEL specified: '%s'. Supported: debug/info/warn/error", logLevel)
+		}
+	}
 
 	config, err := config.ParseFile(*configPath)
 	if err != nil {
