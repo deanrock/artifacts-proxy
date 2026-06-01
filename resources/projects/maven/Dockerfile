@@ -1,8 +1,4 @@
-FROM fedora
-
-RUN curl -L https://www.scala-sbt.org/sbt-rpm.repo > sbt-rpm.repo && \
-    mv sbt-rpm.repo /etc/yum.repos.d/ && \
-    dnf install -y sbt java-25-openjdk-devel
+FROM sbtscala/scala-sbt:eclipse-temurin-alpine-24.0.1_9_1.12.11_2.12.21
 
 ADD . /app
 WORKDIR /app

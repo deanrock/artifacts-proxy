@@ -1,8 +1,7 @@
-FROM fedora
-
-RUN dnf install -y nodejs
+FROM node:alpine
 
 ADD . /app
 WORKDIR /app
 
-CMD ["bash", "-c", "sed -i \"s/PORT/${PORT}/g\" .npmrc && npm ci"]
+ENTRYPOINT []
+CMD ["sh", "-c", "sed -i \"s/PORT/${PORT}/g\" .npmrc && npm ci"]
