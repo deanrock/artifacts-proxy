@@ -171,11 +171,14 @@ func getCachedItem(ctx context.Context, config *config.Config, logger *slog.Logg
 
 		if s3c != nil {
 			err := s3c.fetch(ctx, hash, cacheDir)
-			if err != nil && !isS3NotFound(err) {
+			if err == nil {
+				return serveLocal(typ)
+			}
+
+			if !isS3NotFound(err) {
 				logger.Error("failed fetching from S3", slog.String("err", err.Error()))
 				return nil, errors.Wrap(err, "failed fetching stale from S3")
 			}
-			return serveLocal(typ)
 		}
 
 		return nil, ErrMissing
