@@ -1,8 +1,8 @@
-FROM fedora
+FROM python:alpine
 
-RUN dnf install -y poetry
+RUN pip install poetry
 
 ADD . /app
 WORKDIR /app
 
-CMD ["bash", "-c", "sed -i \"s/PORT/${PORT}/g\" pyproject.toml && poetry lock && poetry install --no-root"]
+CMD ["sh", "-c", "sed -i \"s/PORT/${PORT}/g\" pyproject.toml && poetry lock && poetry install --no-root"]

@@ -7,10 +7,13 @@ import (
 	"artifacts-proxy/pkg/config"
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"os/exec"
 	"testing"
 	"time"
+
+	"github.com/pkg/errors"
 )
 
 func buildImage(t *testing.T, project string) {
@@ -44,48 +47,48 @@ func testCachingBehaviour(t *testing.T, project string, command []string) {
 	t.Helper()
 	cacheDir := t.TempDir()
 
+	runWithConfig := func(f func(config *config.Config)) {
+		listener, err := net.Listen("tcp", "0.0.0.0:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := uint16(listener.Addr().(*net.TCPAddr).Port)
+
+		config, err := config.ParseFile("../../config.toml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		config.Port = port
+		config.CacheDir = cacheDir
+		f(config)
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+
+			err := RunServer(listener, config)
+
+			// Fail if error happens, since otherwise test will just hang.
+			if !errors.Is(err, net.ErrClosed) {
+				log.Fatal(err)
+			}
+
+			done <- struct{}{}
+		}()
+
+		runCommand(t, project, port, command)
+
+		listener.Close()
+		<-done
+	}
+
 	// Phase 1: populate cache via upstream
-	listener1, err := net.Listen("tcp", "0.0.0.0:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port1 := uint16(listener1.Addr().(*net.TCPAddr).Port)
-
-	config1, err := config.ParseFile("../../config.toml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	config1.Port = port1
-	config1.CacheDir = cacheDir
-
-	done1 := make(chan struct{})
-	go func() {
-		defer close(done1)
-		RunServer(listener1, config1)
-	}()
-
-	runCommand(t, project, port1, command)
-
-	listener1.Close()
-	<-done1
+	runWithConfig(func(config *config.Config) {})
 
 	// Phase 2: serve from cache only
-	listener2, err := net.Listen("tcp", "0.0.0.0:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port2 := uint16(listener2.Addr().(*net.TCPAddr).Port)
-
-	config2, err := config.ParseFile("../../config.toml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	config2.Port = port2
-	config2.CacheDir = cacheDir
-
-	go RunServer(listener2, config2)
-
-	runCommand(t, project, port2, command)
+	runWithConfig(func(config *config.Config) {
+		config.EnableUpstreams = false
+	})
 }
 
 func TestNpmE2E(t *testing.T) {
