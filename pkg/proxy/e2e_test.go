@@ -61,7 +61,7 @@ func testCachingBehaviour(t *testing.T, project string, command []string) {
 	done1 := make(chan struct{})
 	go func() {
 		defer close(done1)
-		RunServer(listener1, config1)
+		RunServer(context.Background(), listener1, config1)
 	}()
 
 	runCommand(t, project, port1, command)
@@ -83,7 +83,7 @@ func testCachingBehaviour(t *testing.T, project string, command []string) {
 	config2.Port = port2
 	config2.CacheDir = cacheDir
 
-	go RunServer(listener2, config2)
+	go RunServer(context.Background(), listener2, config2)
 
 	runCommand(t, project, port2, command)
 }

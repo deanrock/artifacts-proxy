@@ -3,6 +3,7 @@ package proxy
 import (
 	"artifacts-proxy/pkg/cache"
 	"artifacts-proxy/pkg/config"
+	"artifacts-proxy/pkg/otel"
 	"artifacts-proxy/pkg/utils"
 	"context"
 	"crypto/tls"
@@ -22,6 +23,25 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sethvargo/go-limiter/memorystore"
 )
+
+// contextKey is a custom type for context keys to avoid collisions
+type contextKey string
+
+// upstreamContextKey is the key for storing upstream name in context
+const upstreamContextKey contextKey = "upstream"
+
+// WithUpstream adds the upstream name to the context
+func WithUpstream(ctx context.Context, upstream string) context.Context {
+	return context.WithValue(ctx, upstreamContextKey, upstream)
+}
+
+// GetUpstream retrieves the upstream name from the context
+func GetUpstream(ctx context.Context) string {
+	if v := ctx.Value(upstreamContextKey); v != nil {
+		return v.(string)
+	}
+	return ""
+}
 
 type UpstreamType string
 
@@ -233,6 +253,8 @@ func getCachedItem(config *config.Config, s3c *s3Store, up *upstream, req *http.
 	if fileExists(cachePath) && fileExists(metaPath) {
 		localMeta, metaErr := readMetadata(metaPath)
 		if metaErr == nil && !isStale(localMeta, up, req.URL.Path) {
+			// Record cache hit with upstream label
+			otel.RecordCacheHit(req.Context(), up.name)
 			return serveLocal("serving")
 		}
 
@@ -251,6 +273,9 @@ func getCachedItem(config *config.Config, s3c *s3Store, up *upstream, req *http.
 
 		// Try upstream; on failure, serve stale
 		log.Printf("refreshing %s %s %s", up.name, req.URL.RequestURI(), hash)
+		// Record cache miss (stale) with upstream label
+		otel.RecordCacheMiss(req.Context(), up.name)
+		
 		upstreamResp, upstreamErr := proxyUpstream(config, up, req)
 		if upstreamErr != nil {
 			return serveLocal("serving-stale")
@@ -264,12 +289,17 @@ func getCachedItem(config *config.Config, s3c *s3Store, up *upstream, req *http.
 
 	if s3c != nil {
 		if err := s3c.fetch(req.Context(), hash, cacheDir); err == nil {
+			// S3 cache hit
+			otel.RecordCacheHit(req.Context(), up.name)
 			return serveLocal("s3-hit")
 		} else if !isS3NotFound(err) {
 			log.Printf("[s3] fetch %s: %v", hash, err)
 		}
 	}
 
+	// Local cache miss - need to fetch from upstream
+	otel.RecordCacheMiss(req.Context(), up.name)
+	
 	log.Printf("fetching %s %s %s", up.name, req.URL.RequestURI(), hash)
 
 	upstreamResp, err := proxyUpstream(config, up, req)
@@ -283,6 +313,8 @@ func getCachedItem(config *config.Config, s3c *s3Store, up *upstream, req *http.
 		return cacheAndServe(upstreamResp)
 	default:
 		log.Printf("[%s] unexpected upstream response: %d", up.name, upstreamResp.StatusCode)
+		// Record upstream error
+		otel.RecordUpstreamError(req.Context(), up.name)
 		return &http.Response{
 			StatusCode: http.StatusBadGateway,
 			Body:       http.NoBody,
@@ -428,7 +460,7 @@ func basicAuthMiddlewareFactory(auth config.ConfigAuth, xForwardedForEnabled boo
 	}, nil
 }
 
-func RunServer(listener net.Listener, config *config.Config) error {
+func RunServer(ctx context.Context, listener net.Listener, config *config.Config) error {
 	tmpPath := filepath.Join(config.CacheDir, "tmp")
 	if err := os.MkdirAll(tmpPath, 0755); err != nil {
 		return fmt.Errorf("creating tmp dir: %w", err)
@@ -502,8 +534,12 @@ func RunServer(listener net.Listener, config *config.Config) error {
 	}
 
 	for _, up := range upstreams {
+		up := up // capture loop variable
 		mux.Handle("GET "+up.path+"/", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			resp, err := getCachedItemWithFallback(config, s3c, up, r)
+			// Add upstream to context for metrics/tracing
+			ctx := WithUpstream(r.Context(), up.name)
+			
+			resp, err := getCachedItemWithFallback(config, s3c, up, r.WithContext(ctx))
 			if err != nil {
 				log.Printf("[%s] error: %v", up.name, err)
 				http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -525,7 +561,40 @@ func RunServer(listener net.Listener, config *config.Config) error {
 		w.WriteHeader(404)
 	})))
 
-	server := &http.Server{Handler: loggingMiddleware(mux)}
+	// Build the middleware chain
+	var handler http.Handler = mux
+	
+	// Add OTEL middleware if OTEL is enabled
+	if config.OTEL != nil && config.OTEL.Enabled {
+		// Add tracing middleware first (innermost)
+		handler = otel.NewTracingMiddleware(handler)
+		
+		// Initialize OTEL metrics if not already initialized
+		if err := otel.InitMetrics(); err != nil {
+			log.Printf("Warning: failed to initialize OTEL metrics: %v", err)
+		} else {
+			// Add metrics middleware
+			handler = otel.NewMetricsMiddleware(handler)
+		}
+	}
+	
+	handler = loggingMiddleware(handler)
+
+	server := &http.Server{
+		Handler: handler,
+		BaseContext: func(listener net.Listener) context.Context {
+			return ctx
+		},
+	}
+
+	// Shutdown OTEL on server shutdown
+	go func() {
+		<-ctx.Done()
+		log.Println("Shutting down OTEL providers...")
+		if shutdownErr := otel.Shutdown(ctx); shutdownErr != nil {
+			log.Printf("Error shutting down OTEL: %v", shutdownErr)
+		}
+	}()
 
 	if config.TLS != nil {
 		cert, err := tls.LoadX509KeyPair(config.TLS.CertPath, config.TLS.KeyPath)

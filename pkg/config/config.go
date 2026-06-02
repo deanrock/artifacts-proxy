@@ -43,6 +43,13 @@ type ConfigS3 struct {
 	Endpoint string `toml:"endpoint"`
 }
 
+type ConfigOTEL struct {
+	Enabled     bool   `toml:"enabled"`
+	Endpoint    string `toml:"endpoint"`
+	Insecure    bool   `toml:"insecure"`
+	ServiceName string `toml:"service_name"`
+}
+
 type Config struct {
 	Port               uint16                    `toml:"port"`
 	TLS                *ConfigTLS                `toml:"tls"`
@@ -52,6 +59,7 @@ type Config struct {
 	Auth               ConfigAuth                `toml:"auth"`
 	S3                 *ConfigS3                 `toml:"s3"`
 	TrustXForwardedFor bool                      `toml:"trust_x_forwarded_for"`
+	OTEL               *ConfigOTEL               `toml:"otel"`
 }
 
 // resolveEnvVars walks all string fields in v and replaces any value starting

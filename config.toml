@@ -7,6 +7,17 @@ trust_x_forwarded_for = true
 username = "user"
 password = "password"
 
+# OpenTelemetry configuration
+# Enable OTEL to export logs, metrics, and traces
+[otel]
+enabled = false
+# OTEL collector endpoint (e.g., "localhost:4317" for OTLP/gRPC)
+endpoint = "localhost:4317"
+# Set to true to use insecure connection (for development)
+insecure = true
+# Service name for OTEL resources
+service_name = "artifacts-proxy"
+
 [upstreams.npm]
 type = "npm"
 path = "/npm"

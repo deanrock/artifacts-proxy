@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"artifacts-proxy/pkg/config"
+	"context"
 	"errors"
 	"log"
 	"net"
@@ -39,7 +40,7 @@ func TestDefaultRouteAuthTable(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		err := RunServer(listener, cfg)
+		err := RunServer(context.Background(), listener, cfg)
 
 		// Fail if error happens, since otherwise test will just hang.
 		if !errors.Is(err, net.ErrClosed) {
