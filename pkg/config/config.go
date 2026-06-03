@@ -54,6 +54,7 @@ type Config struct {
 	Auth               ConfigAuth                `toml:"auth"`
 	S3                 *ConfigS3                 `toml:"s3"`
 	TrustXForwardedFor bool                      `toml:"trust_x_forwarded_for"`
+	PublicOrigin       string                    `toml:"public_origin"`
 }
 
 // resolveEnvVars walks all string fields in v and replaces any value starting
@@ -112,6 +113,9 @@ func ParseFile(path string) (*Config, error) {
 	}
 	if config.Auth.Realm == "" {
 		config.Auth.Realm = "artifacts-proxy"
+	}
+	if config.PublicOrigin == "" {
+		return nil, fmt.Errorf("public_origin must be in format of 'http(s)://example.com[:3000]'")
 	}
 	for name, up := range config.Upstreams {
 		if !slices.Contains([]string{"npm", "pypi", "maven", "apt"}, up.Type) {

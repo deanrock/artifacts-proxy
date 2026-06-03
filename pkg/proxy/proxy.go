@@ -3,6 +3,7 @@ package proxy
 import (
 	"artifacts-proxy/pkg/cache"
 	"artifacts-proxy/pkg/config"
+	"artifacts-proxy/pkg/upstreams"
 	"artifacts-proxy/pkg/utils"
 	"context"
 	"crypto/tls"
@@ -24,32 +25,23 @@ import (
 
 var ErrMissing = errors.New("artifact missing")
 
-type UpstreamType string
-
-const (
-	Npm   UpstreamType = "npm"
-	Pypi  UpstreamType = "pypi"
-	Maven UpstreamType = "maven"
-	Apt   UpstreamType = "apt"
-)
-
-func ParseType(typ string) (UpstreamType, error) {
-	switch typ {
+func ParseType(publicOrigin string, up config.ConfigUpstream) (upstreams.UpstreamType, error) {
+	switch up.Type {
 	case "npm":
-		return Npm, nil
+		return upstreams.NewNpmUpstream(publicOrigin, up.Path, up.UpstreamURL), nil
 	case "pypi":
-		return Pypi, nil
+		return upstreams.PypiUpstream{}, nil
 	case "maven":
-		return Maven, nil
+		return upstreams.NewNoopUpstream("maven"), nil
 	case "apt":
-		return Apt, nil
+		return upstreams.NewNoopUpstream("apt"), nil
 	}
 
-	return "", fmt.Errorf("unknown type")
+	return nil, fmt.Errorf("unknown type")
 }
 
 type upstream struct {
-	typ                  UpstreamType
+	typ                  upstreams.UpstreamType
 	name                 string
 	path                 string
 	upstreamURL          string
@@ -119,13 +111,8 @@ func proxyUpstream(config *config.Config, up *upstream, req *http.Request) (*htt
 	// Specify user agent to be nice. Additionally, some upstreams might throttle requests without one.
 	outReq.Header.Set("User-Agent", "ArtifactsProxy (+https://github.com/deanrock/artifacts-proxy)")
 
-	// Python's Simple repository API supports either application/vnd.pypi.simple.v1+html
-	// (same as text/html) or application/vnd.pypi.simple.v1+json.
-	//
-	// Here we force HTML, since it might be a bit more supported, and to ensure that a single
-	// content type is always cached.
-	if up.typ == Pypi {
-		outReq.Header.Set("Content-Type", "text/html")
+	if err := up.typ.ModifyRequest(outReq); err != nil {
+		return nil, errors.Wrap(err, "failed modifying request")
 	}
 
 	if up.authenticationHeader != nil {
@@ -206,19 +193,13 @@ func getCachedItem(ctx context.Context, config *config.Config, logger *slog.Logg
 			return err
 		}
 
-		if up.typ == Pypi && ct == "text/html" {
-			body, err := io.ReadAll(upstreamResp.Body)
-			if err != nil {
-				return err
-			}
-			rewritten := strings.ReplaceAll(string(body), "https://files.pythonhosted.org/", "/pythonhosted/")
-			if err := atomicWriteBytes(filepath.Join(cacheDir, "tmp"), cachePath, []byte(rewritten)); err != nil {
-				return err
-			}
-		} else {
-			if err := atomicWriteReader(filepath.Join(cacheDir, "tmp"), cachePath, upstreamResp.Body); err != nil {
-				return err
-			}
+		reader, err := up.typ.ModifyResponse(upstreamResp)
+		if err != nil {
+			return errors.Wrap(err, "failed modifying response")
+		}
+
+		if err := atomicWriteReader(filepath.Join(cacheDir, "tmp"), cachePath, reader); err != nil {
+			return err
 		}
 
 		if s3c != nil {
@@ -452,7 +433,7 @@ func RunServer(listener net.Listener, config *config.Config) error {
 		slog.Info("S3 storage enabled", slog.String("bucket", config.S3.Bucket), slog.String("region", config.S3.Region))
 	}
 
-	upstreams := make(map[string]*upstream)
+	upstreamMap := make(map[string]*upstream)
 	for name, cfg := range config.Upstreams {
 		if strings.HasSuffix(cfg.Path, "/") {
 			return fmt.Errorf("upstream path must not end with a slash: %s", cfg.Path)
@@ -461,7 +442,7 @@ func RunServer(listener net.Listener, config *config.Config) error {
 		metadataMaxAge, _ := time.ParseDuration(cfg.MetadataMaxAge)
 		contentMaxAge, _ := time.ParseDuration(cfg.ContentMaxAge)
 
-		typ, err := ParseType(cfg.Type)
+		typ, err := ParseType(config.PublicOrigin, cfg)
 		if err != nil {
 			return errors.Wrapf(err, "failed to parse type '%s'", cfg.Type)
 		}
@@ -484,13 +465,14 @@ func RunServer(listener net.Listener, config *config.Config) error {
 				contentMaxAge:        contentMaxAge,
 			}
 		}
-		upstreams[name] = up
+		upstreamMap[name] = up
 	}
 
-	if _, exists := upstreams["pythonhosted"]; exists {
+	if _, exists := upstreamMap["pythonhosted"]; exists {
 		return fmt.Errorf("pythonhosted is a reserved hardcoded upstream")
 	}
-	upstreams["pythonhosted"] = &upstream{
+	upstreamMap["pythonhosted"] = &upstream{
+		typ:            upstreams.PypiUpstream{},
 		name:           "pythonhosted",
 		path:           "/pythonhosted",
 		upstreamURL:    "https://files.pythonhosted.org",
@@ -509,7 +491,7 @@ func RunServer(listener net.Listener, config *config.Config) error {
 		return err
 	}
 
-	for _, up := range upstreams {
+	for _, up := range upstreamMap {
 		// In case of `/pypi/simple -> https://pypi.org/simple` we need to support proxying both `/pypi/simple/` as well as just `/pypi/simple`.
 		for _, url := range []string{up.path, up.path + "/"} {
 			mux.Handle("GET "+url, authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
