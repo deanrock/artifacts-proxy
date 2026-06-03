@@ -7,6 +7,3 @@ test:
 
 test-e2e:
 	go test -timeout 180s -v -tags e2e ./...
-
-buildx:
-	
