@@ -256,6 +256,10 @@ func getCachedItem(ctx context.Context, config *config.Config, logger *slog.Logg
 	logger.Debug("refreshing from upstream")
 	upstreamResp, err := proxyUpstream(config, up, req)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil, err
+		}
+
 		logger.Error("refreshing from upstream failed", slog.String("err", err.Error()))
 		return serveStale("upstream-failed")
 	}
@@ -511,6 +515,11 @@ func RunServer(listener net.Listener, config *config.Config) error {
 			mux.Handle("GET "+url, authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				resp, err := getCachedItemWithFallback(config, s3c, up, r)
 				if err != nil {
+					if errors.Is(err, context.Canceled) {
+						w.WriteHeader(499)
+						return
+					}
+
 					slog.Error("request failed", slog.String("url", r.URL.Path), slog.String("err", err.Error()))
 					http.Error(w, "internal server error", http.StatusInternalServerError)
 					return
