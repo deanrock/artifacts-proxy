@@ -457,6 +457,7 @@ func RunServer(listener net.Listener, config *config.Config) error {
 		}
 		if cfg.Fallback != nil {
 			up.fallback = &upstream{
+				typ:                  typ,
 				name:                 name + "-fallback",
 				path:                 cfg.Path,
 				upstreamURL:          cfg.Fallback.UpstreamURL,
