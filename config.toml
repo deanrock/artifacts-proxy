@@ -2,6 +2,7 @@ cache_dir = "./cache"
 port = 3000
 enable_upstreams = true
 trust_x_forwarded_for = true
+public_origin = "http://localhost:3000"
 
 [auth]
 username = "user"
